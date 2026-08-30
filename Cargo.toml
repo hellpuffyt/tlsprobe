@@ -1,0 +1,37 @@
+[package]
+name = "tlsprobe"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88"
+authors = ["Prabesh Sharma"]
+license = "MIT"
+description = "Audit a TLS endpoint's certificate chain, expiry, and protocol/cipher configuration with plain-language findings and remediation."
+repository = "https://github.com/hellpuffyt/tlsprobe"
+readme = "README.md"
+keywords = ["tls", "ssl", "certificate", "security", "audit"]
+categories = ["command-line-utilities", "network-programming"]
+
+[dependencies]
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+rustls-pki-types = "1"
+webpki-roots = "0.26"
+x509-parser = "0.16"
+oid-registry = "0.7"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+
+[dev-dependencies]
+rcgen = "0.13"
+time = "0.3"
+
+[lints.rust]
+unsafe_code = "forbid"
+
+[lints.clippy]
+all = { level = "deny", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+unwrap_used = "deny"
+expect_used = "deny"
+module_name_repetitions = "allow"

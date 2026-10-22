@@ -26,15 +26,22 @@ around that question.
 
 - **Certificate inspection** — subject, issuer, SANs, validity window,
   days to expiry, key algorithm and size, signature algorithm, serial.
-- **Chain analysis** — chain length, self-signed detection, chain
-  ordering, and detection of a very common real misconfiguration: a
+- **Chain analysis** — validation of the served chain against the public
+  web PKI roots (Mozilla's set via `webpki-roots`, the same `webpki` path
+  validation a rustls client performs), chain length, self-signed
+  detection, chain ordering, and detection of a very common real misconfiguration: a
   server that serves its leaf certificate without the intermediate. That
   setup often still works in browsers that cache the intermediate or do
   AIA fetching, and fails for everything else (curl, mobile apps, IoT).
 - **Findings with severity and remediation** in the style of a security
   report — see the [reference table](#findings-reference) below.
-- **Protocol/cipher reporting** for the negotiated connection, with
-  deprecated versions and weak cipher suites flagged.
+- **Protocol/cipher reporting** for the negotiated connection. Note the
+  limit: tlsprobe speaks TLS through rustls, which only negotiates TLS 1.2
+  and 1.3 with modern AEAD suites. A server that offers *only* older
+  protocols or weak ciphers fails the handshake (reported as an error),
+  and tlsprobe does **not** detect whether a server *additionally* enables
+  them. The `DEPRECATED_PROTOCOL` / `WEAK_CIPHER` rules exist for the
+  negotiated values but cannot fire against a real server today.
 - **A–F grading**, text and JSON output, a `--min-grade` gate for CI, and
   support for auditing multiple targets in one invocation.
 
@@ -82,7 +89,7 @@ Requires Rust 1.88 or newer (see [MSRV](#msrv)).
 # Audit one host (defaults to port 443)
 tlsprobe example.com
 
-# Audit multiple targets, some with explicit ports
+# Audit multiple targets, some with explicit ports (IPv6: [::1]:8443)
 tlsprobe example.com internal.example.com:8443
 
 # Machine-readable output
@@ -95,25 +102,34 @@ tlsprobe --min-grade B example.com
 tlsprobe --timeout 5 --port 8443 example.com
 ```
 
-Example text output:
+Real text output against a local test server (`openssl s_server` with a
+throwaway self-signed certificate for `localhost` / `127.0.0.1`):
 
 ```
-== example.com (example.com:443) ==
+$ tlsprobe 127.0.0.1:18950
+== 127.0.0.1:18950 (127.0.0.1:18950) ==
 Protocol: TLSv1.3   Cipher: TLS13_AES_256_GCM_SHA384
-Grade: A
-Chain length: 2
+Grade: F
+Chain length: 1
 
 Leaf certificate:
-  Subject:   CN=example.com
-  Issuer:    C=US, O=Example CA, CN=Example CA
-  SANs:      example.com, www.example.com
-  Serial:    01:02:03:...
+  Subject:   CN=localhost
+  Issuer:    CN=localhost
+  SANs:      localhost, 127.0.0.1
+  Serial:    57:d2:f8:c9:cc:fa:8a:2e:84:df:61:36:8d:77:9e:8f:2f:d1:39:9e
   Key:       EC 256 bits
   Signature: ecdsa-with-SHA256
-  Validity:  2026-01-01T00:00:00Z -> 2026-04-01T00:00:00Z
+  Validity:  2026-10-22T14:02:00Z -> 2027-01-20T14:02:00Z
 
-Findings: none
+Findings (2):
+  [CRITICAL] UNTRUSTED_CHAIN -- Certificate chain does not validate against public trust roots
+      Validating the served chain the way a browser does (webpki, Mozilla root set) failed: invalid peer certificate: Other(OtherError(CaUsedAsEndEntity)). Browsers and most HTTP clients will refuse the connection. Expected only for endpoints whose clients deliberately trust a private CA.
+      Fix: Serve a certificate issued by a publicly trusted CA, together with every intermediate needed to reach its root.
+  [HIGH] SELF_SIGNED -- Leaf certificate is self-signed
+      ...
 ```
+
+The exit status is 0 here because no `--min-grade` was given.
 
 ## Findings reference
 
@@ -122,15 +138,17 @@ Findings: none
 | `EXPIRED` | Critical | Certificate's `not_after` is in the past. | Renew and deploy immediately. |
 | `EXPIRING_CRITICAL` | High | Expires within 7 days. | Renew now. |
 | `EXPIRING_WARNING` | Medium | Expires within 30 days. | Schedule renewal, ideally via ACME automation. |
-| `HOSTNAME_MISMATCH` | Critical | Requested hostname isn't in the cert's SANs (wildcards supported). | Issue a cert covering the hostname, or connect to a covered one. |
+| `UNTRUSTED_CHAIN` | Critical | The served chain does not validate to a root in the public web PKI (unknown issuer, missing intermediate, bad signature, ...). Expiry and hostname problems are excluded here; they have their own findings. | Serve a publicly trusted certificate with its full chain. Expected for private-CA endpoints. |
+| `HOSTNAME_MISMATCH` | Critical | Requested hostname (or IP address) isn't in the cert's SANs (wildcards supported). | Issue a cert covering the hostname, or connect to a covered one. |
+| `WEAK_SIGNATURE_MD5` | High | Certificate signed with MD5. | Reissue with SHA-256 or stronger. |
 | `WEAK_SIGNATURE_SHA1` | High | Certificate signed with SHA-1. | Reissue with SHA-256 or stronger. |
 | `WEAK_KEY_RSA` | High | RSA key smaller than 2048 bits. | Reissue with >=2048-bit RSA or switch to EC. |
 | `SELF_SIGNED` | High | Leaf certificate's issuer equals its subject. | Use a publicly trusted CA for anything reachable by real clients. |
 | `MISSING_INTERMEDIATE` | Medium | Server served only the leaf, no intermediate. | Configure the server to serve its full chain. |
 | `CHAIN_ORDER` | Medium | Served certificates aren't in issuer-linked order. | Serve leaf-to-root, verify each issuer actually issued the next cert. |
 | `LONG_VALIDITY` | Low | Validity period exceeds 398 days (CA/Browser Forum baseline). | Reissue at <=398 days; prefer short-lived automated issuance. |
-| `DEPRECATED_PROTOCOL` | High | Negotiated SSLv2/SSLv3/TLS 1.0/TLS 1.1. | Disable on the server; require TLS 1.2+, prefer TLS 1.3. |
-| `WEAK_CIPHER` | Medium | Negotiated cipher suite is RC4/3DES/DES/NULL/EXPORT/MD5/legacy-CBC. | Restrict to modern AEAD suites. |
+| `DEPRECATED_PROTOCOL` | High | Negotiated SSLv2/SSLv3/TLS 1.0/TLS 1.1 (cannot occur with rustls; see Features). | Disable on the server; require TLS 1.2+, prefer TLS 1.3. |
+| `WEAK_CIPHER` | Medium | Negotiated cipher suite is RC4/3DES/DES/NULL/EXPORT/MD5/legacy-CBC (cannot occur with rustls; see Features). | Restrict to modern AEAD suites. |
 
 Grading: any `Critical` finding forces an `F`. Otherwise the grade starts
 at 100 and subtracts per finding (High -20, Medium -10, Low -4), then maps
@@ -147,8 +165,13 @@ in-memory fixture data — every rule has both a triggering case and a
 false-positive guard. `src/cert.rs` is tested against real DER
 certificates generated on the fly with `rcgen` (no OpenSSL, no committed
 key material). The integration tests in `tests/integration.rs` spin up a
-throwaway TLS server on `127.0.0.1` and probe it end-to-end; none of the
-test suite requires reaching the public internet.
+throwaway TLS server on `127.0.0.1` and probe it end-to-end;
+`tests/trust.rs` builds a root → intermediate → leaf PKI at runtime and
+checks trust validation (trusted with the test root, untrusted against
+the public roots, broken by a missing intermediate, not masked by expiry
+or a name mismatch), probes servers that close immediately or never
+answer, IPv6 targets, and JSON error output. None of the test suite
+requires reaching the public internet, and no key material is committed.
 
 ## Security
 
@@ -162,8 +185,8 @@ test suite requires reaching the public internet.
 - No secrets, private keys, or credentials are read, stored, or
   transmitted by this tool.
 
-Found a security issue in `tlsprobe` itself? Please open an issue with
-details.
+Found a security issue in `tlsprobe` itself? Please report it privately
+as described in [SECURITY.md](SECURITY.md).
 
 ## License
 

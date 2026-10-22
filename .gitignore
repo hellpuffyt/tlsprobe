@@ -4,3 +4,6 @@ Cargo.lock.bak
 *.key
 .idea/
 .vscode/
+*.profraw
+.env*
+.DS_Store

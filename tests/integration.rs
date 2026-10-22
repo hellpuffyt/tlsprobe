@@ -83,7 +83,7 @@ fn probes_self_signed_server_and_reports_self_signed_finding() {
     assert_eq!(conn.hostname, "127.0.0.1");
     assert_eq!(conn.port, port);
     assert!(conn.protocol_version.starts_with("TLSv1."));
-    assert!(!conn.cipher_suite.is_empty());
+    assert_ne!(conn.cipher_suite, "");
 
     let findings = tlsprobe::analysis::analyze(&chain, &conn, tlsprobe::now_unix());
     assert!(findings.iter().any(|f| f.id == "SELF_SIGNED"));

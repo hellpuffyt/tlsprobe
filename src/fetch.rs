@@ -161,6 +161,14 @@ pub fn probe(
         .map(|der| CertInfo::from_der(der.as_ref()))
         .collect::<Result<Vec<_>, _>>()?;
 
+    let trust = crate::trust::verify_chain(
+        peer_certs,
+        &certs,
+        hostname,
+        crate::trust::public_roots(),
+        UnixTime::now(),
+    );
+
     let protocol_version = conn
         .protocol_version()
         .map_or_else(|| "unknown".to_string(), describe_protocol_version);
@@ -175,6 +183,7 @@ pub fn probe(
             port,
             protocol_version,
             cipher_suite,
+            trust,
         },
     ))
 }

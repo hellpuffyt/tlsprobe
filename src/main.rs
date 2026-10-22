@@ -39,8 +39,20 @@ struct Cli {
 }
 
 fn parse_target(raw: &str, default_port: u16) -> (String, u16) {
-    // IPv6 literals like `[::1]:443` are not a target we try to special-case
-    // here; `host:port` covers the overwhelming majority of real use.
+    // IPv6 literals: `[::1]:8443`, `[::1]`, or a bare `::1` (no port possible
+    // without brackets, since the address itself contains colons).
+    if let Some(rest) = raw.strip_prefix('[') {
+        if let Some((host, after)) = rest.split_once(']') {
+            let port = after
+                .strip_prefix(':')
+                .and_then(|p| p.parse::<u16>().ok())
+                .unwrap_or(default_port);
+            return (host.to_string(), port);
+        }
+    }
+    if raw.parse::<std::net::Ipv6Addr>().is_ok() {
+        return (raw.to_string(), default_port);
+    }
     if let Some((host, port_str)) = raw.rsplit_once(':') {
         if let Ok(port) = port_str.parse::<u16>() {
             return (host.to_string(), port);
@@ -83,7 +95,12 @@ fn main() -> ExitCode {
             Err(e) => {
                 had_failure = true;
                 if cli.json {
-                    eprintln!(r#"{{"target":"{target}","error":"{e}"}}"#);
+                    // serde_json escapes quotes in the message (e.g. an
+                    // invalid hostname is reported in quotes).
+                    eprintln!(
+                        "{}",
+                        serde_json::json!({ "target": target, "error": e.to_string() })
+                    );
                 } else {
                     eprintln!("== {target} ==\nERROR: {e}\n");
                 }
@@ -129,6 +146,14 @@ mod tests {
             parse_target("example.com", 443),
             ("example.com".to_string(), 443)
         );
+    }
+
+    #[test]
+    fn parse_target_ipv6_forms() {
+        // Regression: "::1" was split into host ":" and port 1.
+        assert_eq!(parse_target("::1", 443), ("::1".to_string(), 443));
+        assert_eq!(parse_target("[::1]:8443", 443), ("::1".to_string(), 8443));
+        assert_eq!(parse_target("[::1]", 443), ("::1".to_string(), 443));
     }
 
     #[test]

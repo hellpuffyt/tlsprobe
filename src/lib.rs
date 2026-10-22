@@ -13,11 +13,10 @@ pub mod analysis;
 pub mod cert;
 pub mod fetch;
 pub mod report;
+pub mod trust;
 
-/// Current time as seconds since the Unix epoch.
-///
-/// # Panics
-/// Panics if the system clock is set before the Unix epoch.
+/// Current time as seconds since the Unix epoch (0 if the system clock is
+/// set before the epoch).
 #[must_use]
 pub fn now_unix() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};

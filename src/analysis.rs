@@ -10,6 +10,7 @@ use serde::Serialize;
 use std::cmp::Ordering;
 
 use crate::cert::{ChainInfo, ConnectionInfo};
+use crate::trust::TrustStatus;
 
 /// How dangerous a finding is.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
@@ -121,6 +122,7 @@ pub fn analyze(chain: &ChainInfo, conn: &ConnectionInfo, now: i64) -> Vec<Findin
         findings.extend(check_self_signed(leaf));
         findings.extend(check_long_validity(leaf));
     }
+    findings.extend(check_trust(conn));
     findings.extend(check_missing_intermediate(chain));
     findings.extend(check_chain_order(chain));
     findings.extend(check_protocol_version(conn));
@@ -209,6 +211,23 @@ fn check_expiry(leaf: &crate::cert::CertInfo, now: i64) -> Vec<Finding> {
 }
 
 fn check_weak_signature(leaf: &crate::cert::CertInfo) -> Vec<Finding> {
+    // MD5 is described by the parser but was never flagged, although it is
+    // weaker than SHA-1 (practical chosen-prefix collisions since 2008).
+    if leaf.signature_algorithm.starts_with("md5") {
+        return vec![Finding {
+            id: "WEAK_SIGNATURE_MD5",
+            severity: Severity::High,
+            title: "Certificate signed with MD5".to_string(),
+            description: format!(
+                "The leaf certificate uses the signature algorithm \"{}\", which relies on \
+                 MD5. MD5 collisions have been used to forge certificates, and browsers \
+                 reject MD5 certificate signatures.",
+                leaf.signature_algorithm
+            ),
+            remediation: "Reissue the certificate with a SHA-256 (or stronger) signature \
+                           algorithm.",
+        }];
+    }
     if leaf.signature_is_sha1 {
         return vec![Finding {
             id: "WEAK_SIGNATURE_SHA1",
@@ -258,7 +277,7 @@ fn check_hostname(leaf: &crate::cert::CertInfo, hostname: &str) -> Vec<Finding> 
         title: "Certificate does not cover the requested hostname".to_string(),
         description: format!(
             "\"{hostname}\" is not present in the certificate's subject alternative names \
-             ({:?}) or its subject.",
+             ({:?}); browsers ignore the subject CN for this check.",
             leaf.sans
         ),
         remediation: "Issue a certificate that includes the hostname in its subject \
@@ -271,6 +290,14 @@ fn check_hostname(leaf: &crate::cert::CertInfo, hostname: &str) -> Vec<Finding> 
 /// left-most wildcard label (`*.example.com`).
 #[must_use]
 pub fn hostname_matches(leaf: &crate::cert::CertInfo, hostname: &str) -> bool {
+    // IP targets are compared as addresses: an IPv6 SAN is rendered in full
+    // (`0000:...:0001`) while the target is usually compressed (`::1`).
+    if let Ok(ip) = hostname.parse::<std::net::IpAddr>() {
+        return leaf
+            .sans
+            .iter()
+            .any(|san| san.parse::<std::net::IpAddr>() == Ok(ip));
+    }
     let hostname = hostname.to_ascii_lowercase();
     leaf.sans.iter().any(|san| dns_name_matches(san, &hostname))
 }
@@ -286,6 +313,25 @@ fn dns_name_matches(pattern: &str, hostname: &str) -> bool {
         }
     }
     false
+}
+
+fn check_trust(conn: &ConnectionInfo) -> Vec<Finding> {
+    match &conn.trust {
+        TrustStatus::Untrusted(reason) => vec![Finding {
+            id: "UNTRUSTED_CHAIN",
+            severity: Severity::Critical,
+            title: "Certificate chain does not validate against public trust roots".to_string(),
+            description: format!(
+                "Validating the served chain the way a browser does (webpki, Mozilla \
+                 root set) failed: {reason}. Browsers and most HTTP clients will refuse \
+                 the connection. Expected only for endpoints whose clients deliberately \
+                 trust a private CA."
+            ),
+            remediation: "Serve a certificate issued by a publicly trusted CA, together with \
+                          every intermediate needed to reach its root.",
+        }],
+        TrustStatus::Trusted | TrustStatus::NotChecked => Vec::new(),
+    }
 }
 
 fn check_self_signed(leaf: &crate::cert::CertInfo) -> Vec<Finding> {
@@ -471,7 +517,25 @@ mod tests {
             port: 443,
             protocol_version: "TLSv1.3".to_string(),
             cipher_suite: "TLS13_AES_256_GCM_SHA384".to_string(),
+            trust: TrustStatus::Trusted,
         }
+    }
+
+    #[test]
+    fn untrusted_chain_is_critical_and_forces_f() {
+        let chain = ChainInfo {
+            certs: vec![healthy_leaf(), intermediate()],
+        };
+        let mut conn = healthy_conn();
+        conn.trust = TrustStatus::Untrusted("UnknownIssuer".to_string());
+        let findings = analyze(&chain, &conn, NOW);
+        assert!(has_finding(&findings, "UNTRUSTED_CHAIN"));
+        assert_eq!(grade(&findings), Grade::F);
+        conn.trust = TrustStatus::Trusted;
+        assert!(!has_finding(
+            &analyze(&chain, &conn, NOW),
+            "UNTRUSTED_CHAIN"
+        ));
     }
 
     fn has_finding(findings: &[Finding], id: &str) -> bool {
@@ -593,6 +657,31 @@ mod tests {
         let findings = check_hostname(&leaf, "not-example.com");
         assert_eq!(findings.len(), 1);
         assert_eq!(findings[0].severity, Severity::Critical);
+    }
+
+    #[test]
+    fn ipv6_target_matches_a_fully_written_ipv6_san() {
+        // Regression: SANs are rendered uncompressed, so "::1" never matched.
+        let mut leaf = healthy_leaf();
+        leaf.sans = vec!["0000:0000:0000:0000:0000:0000:0000:0001".to_string()];
+        assert!(hostname_matches(&leaf, "::1"));
+        assert!(!hostname_matches(&leaf, "::2"));
+        leaf.sans = vec!["127.0.0.1".to_string()];
+        assert!(hostname_matches(&leaf, "127.0.0.1"));
+        assert!(!hostname_matches(&leaf, "127.0.0.2"));
+    }
+
+    #[test]
+    fn md5_signature_flagged() {
+        let mut leaf = healthy_leaf();
+        leaf.signature_algorithm = "md5WithRSAEncryption".to_string();
+        let chain = ChainInfo {
+            certs: vec![leaf, intermediate()],
+        };
+        assert!(has_finding(
+            &analyze(&chain, &healthy_conn(), NOW),
+            "WEAK_SIGNATURE_MD5"
+        ));
     }
 
     #[test]

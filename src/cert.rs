@@ -204,6 +204,8 @@ pub struct ConnectionInfo {
     pub port: u16,
     pub protocol_version: String,
     pub cipher_suite: String,
+    /// Whether the served chain validates against the public web PKI roots.
+    pub trust: crate::trust::TrustStatus,
 }
 
 #[cfg(test)]

@@ -249,14 +249,14 @@ mod tests {
         assert_eq!(info.not_after, 1_800_000_000);
         assert_eq!(info.key_algorithm, "EC");
         assert_eq!(info.key_size_bits, Some(256));
-        assert!(!info.serial.is_empty());
+        assert_ne!(info.serial, "");
     }
 
     #[test]
     fn parses_cert_without_sans() {
         let der = self_signed_cert_der(vec![], 1_700_000_000, 1_800_000_000);
         let info = CertInfo::from_der(&der).expect("parse");
-        assert!(info.sans.is_empty());
+        assert_eq!(info.sans, [] as [std::string::String; 0]);
     }
 
     #[test]
